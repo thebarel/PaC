@@ -4,6 +4,19 @@ PaC is a small durable workflow engine for agentic work. Workflows are ordinary 
 
 > PaC does not make language-model generation deterministic. It makes the process around agent execution deterministic: scheduling, dependencies, state transitions, retries, persistence, validation decisions, and replay decisions.
 
+## Personal Note
+This library was created with [flowboard](https://github.com/thebarel/flowboard) to create agentic workflows in a blink of an eye.
+I must say, I used it few times, and it worked like a charm. My process was:
+- Create the workflow design via `flowboard`
+- Export it to PaC code (via the export button)
+- Launch an AI agent in plan mode and telling it to fill the todos
+- Answering all the questions about each node in the workflow
+- Creating a fully working workflow - with deterministic steps
+
+Currently, `PaC` only supports `codex` as its harness.
+
+I really think that what makes this so code is the output validation, you can make sure that your agent is REALLY doing what it is supposed to do.
+
 ## Installation
 
 PaC requires Python 3.11 or newer and uses the official Python Codex SDK.
@@ -14,6 +27,7 @@ pip install -e .
 
 The SDK controls a local Codex app-server and uses your normal Codex authentication.
 
+-----
 ## First workflow
 
 ```python
