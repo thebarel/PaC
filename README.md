@@ -1,4 +1,4 @@
-# PaC — Process as Code
+# PaC - Process as Code
 
 PaC is a small durable workflow engine for agentic work. Workflows are ordinary Python code; PaC owns deterministic scheduling, dependencies, transitions, retries, persistence, recovery, and Codex thread lifecycle.
 
@@ -22,7 +22,11 @@ I really think that what makes this so code is the output validation, you can ma
 PaC requires Python 3.11 or newer and uses the official Python Codex SDK.
 
 ```bash
-pip install -e .
+git clone https://github.com/thebarel/PaC.git
+cd PaC
+python3 -m venv .venv
+source .venv/bin/activate
+pip3 install -e .
 ```
 
 The SDK controls a local Codex app-server and uses your normal Codex authentication.
