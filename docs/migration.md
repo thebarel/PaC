@@ -29,6 +29,8 @@ Install the Codex integration through the `codex` extra when packaging no longer
 pip install 'process-as-code[codex]'
 ```
 
+To migrate a Codex-specific step to Claude Code, install `process-as-code[claude-code]`, inject `ClaudeCodeRuntime`, and replace `ctx.codex.run(...)` with `await ctx.agent.execute(...)`. Claude sessions are stored through PaC's generic per-step runtime-session record; existing Codex thread IDs are not converted into Claude sessions. Changing runtime provider or its fingerprinted tool/model/permission configuration changes the workflow fingerprint, so start a new run rather than resuming unfinished work under a different provider.
+
 ## Explicit runs
 
 The original runtime implicitly selected the latest active run by workflow name and prevented concurrent same-name execution. PaC now separates definition identity from execution identity.

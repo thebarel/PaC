@@ -43,6 +43,8 @@ from .runtime import (
     AgentResult,
     AgentRuntime,
     AgentUsage,
+    ClaudeCodeOptions,
+    ClaudeCodeRuntime,
     CodexRuntime,
     FakeAgentRuntime,
 )
@@ -79,6 +81,8 @@ __all__ = [
     "AgentResult",
     "AgentRuntime",
     "AgentUsage",
+    "ClaudeCodeOptions",
+    "ClaudeCodeRuntime",
     "CodexRuntime",
     "CompositeValidator",
     "AESGCMEncryptionCodec",

@@ -7,6 +7,7 @@ from .base import (
     AgentUsage,
 )
 from .binding import BoundAgent
+from .claude_code import ClaudeCodeOptions, ClaudeCodeRuntime
 from .codex import CodexRuntime
 from .fake import FakeAgentRuntime
 
@@ -18,6 +19,8 @@ __all__ = [
     "AgentRuntime",
     "AgentUsage",
     "BoundAgent",
+    "ClaudeCodeOptions",
+    "ClaudeCodeRuntime",
     "CodexRuntime",
     "FakeAgentRuntime",
 ]

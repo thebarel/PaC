@@ -239,9 +239,26 @@ An `AgentRuntime` implements:
 async def execute(request: AgentRequest, context: AgentExecutionContext) -> AgentResult
 ```
 
-Provider adapters may manage sessions internally through persisted runtime-session facilities. Do not expose provider SDK objects as process state. `AgentResult.raw` is non-persisted compatibility/debug data.
+Provider adapters manage sessions through the narrow persisted runtime-session callbacks on `AgentExecutionContext`. Do not expose provider SDK objects as process state. `AgentResult.raw` is non-persisted compatibility/debug data. A runtime can implement `fingerprint_config()` so behavior-affecting options participate in unfinished-run compatibility checks.
 
 Tests should use `FakeAgentRuntime`; never rely on a live model. The Codex adapter retains `ctx.codex.run(prompt, output_schema=...)`, per-step thread reuse, and workflow-level Codex configuration.
+
+### Claude Code adapter
+
+Install `process-as-code[claude-code]` and inject `ClaudeCodeRuntime`. The adapter uses the Claude Agent SDK `query()` API, maps output schemas to SDK structured output, records neutral usage/cost, and persists a separate Claude session ID for each PaC step. Request-level `model` overrides the runtime default.
+
+```python
+runtime = ClaudeCodeRuntime(
+    ClaudeCodeOptions(
+        model="claude-sonnet-4-5",
+        permission_mode="dontAsk",
+        allowed_tools=("Read", "Grep"),
+        disallowed_tools=("Bash", "Write", "Edit"),
+    )
+)
+```
+
+Do not use ambient `continue_conversation` behavior in durable workers; PaC resumes the explicit persisted session. Session portability between machines depends on the SDK's session storage, not only the ID. PaC does not default to `bypassPermissions`. Tool permissions are a security boundary configured by the workflow author, and tool side effects remain subject to the same at-least-once/crash caveats as ordinary Python effects.
 
 ## Parallel scheduling and claims
 

@@ -26,7 +26,7 @@ The async runner claims a bounded prefix of the runnable set. Native async metho
 
 ### Agent runtime
 
-`AgentRuntime` is an async provider-neutral protocol over `AgentRequest`, `AgentExecutionContext`, and `AgentResult`. Provider adapters translate these types and can report nullable usage. Core scheduling never branches on provider identity.
+`AgentRuntime` is an async provider-neutral protocol over `AgentRequest`, `AgentExecutionContext`, and `AgentResult`. Provider adapters translate these types and can report nullable usage. Core scheduling never branches on provider identity. `AgentExecutionContext` exposes narrow per-step runtime-session callbacks rather than the state store, allowing adapters such as Claude Code and Codex to resume explicit provider sessions without provider-specific core columns. Runtime adapters may fingerprint their non-secret behavioral configuration.
 
 ### Persistence
 

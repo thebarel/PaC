@@ -16,6 +16,7 @@ dependencies = []
 pac = "pac.cli:main"
 
 [project.optional-dependencies]
+claude-code = ["claude-agent-sdk>=0.2.148,<0.3"]
 codex = ["openai-codex>=0.147.0,<0.148"]
 dev = ["mypy>=1.17", "pytest>=8", "ruff>=0.12"]
 encryption = ["cryptography>=42"]
@@ -46,5 +47,5 @@ warn_redundant_casts = true
 warn_unused_ignores = true
 
 [[tool.mypy.overrides]]
-module = ["cryptography.*", "openai_codex", "opentelemetry.*", "psycopg", "psycopg.*"]
+module = ["claude_agent_sdk", "claude_agent_sdk.*", "cryptography.*", "openai_codex", "opentelemetry.*", "psycopg", "psycopg.*"]
 ignore_missing_imports = true

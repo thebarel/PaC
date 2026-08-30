@@ -46,11 +46,14 @@ pip install -e .
 Optional integrations:
 
 ```bash
-pip install -e '.[codex]'       # official Codex adapter
-pip install -e '.[postgres]'    # psycopg 3 backend
-pip install -e '.[encryption]'  # AES-256-GCM payload encryption
-pip install -e '.[otel]'        # OpenTelemetry event exporter
-pip install -e '.[dev]'         # tests and development tools
+pip install 'process-as-code[claude-code]' # Anthropic Claude Agent SDK adapter
+pip install 'process-as-code[codex]'       # official Codex adapter
+pip install 'process-as-code[postgres]'    # psycopg 3 backend
+pip install 'process-as-code[encryption]'  # AES-256-GCM payload encryption
+pip install 'process-as-code[otel]'        # OpenTelemetry event exporter
+
+# Contributors working from this checkout:
+pip install -e '.[dev]'
 ```
 
 ## Architecture
@@ -68,7 +71,7 @@ pip install -e '.[dev]'         # tests and development tools
               |              AgentRuntime             |
               |          +--------+--------+           |
               |          |        |        |           |
-              |       Codex     Fake     Custom         |
+              |    Claude Code  Codex   Fake / Custom   |
               +-------------------+-------------------+
                                   |
               typed codec -> deterministic validators
@@ -189,6 +192,49 @@ class MyRuntime:
 ```
 
 `AgentResult` can carry provider-neutral token, cost, and latency metadata. The deterministic `FakeAgentRuntime` keeps tests independent of live APIs. `CodexRuntime` remains available, and legacy `ctx.codex.run(...)` is retained as a compatibility facade.
+
+#### Claude Code through the Claude Agent SDK
+
+Install the optional adapter:
+
+```bash
+pip install 'process-as-code[claude-code]'
+```
+
+Then inject it like any other runtime:
+
+```python
+from pac import AgentRequest, ClaudeCodeOptions, ClaudeCodeRuntime, Step, Workflow
+
+runtime = ClaudeCodeRuntime(
+    ClaudeCodeOptions(
+        model="claude-sonnet-4-5",
+        permission_mode="dontAsk",
+        allowed_tools=("Read", "Grep", "Glob"),
+        disallowed_tools=("Bash", "Write", "Edit"),
+        max_turns=5,
+    )
+)
+
+class Analyze(Step):
+    async def run(self, ctx):
+        result = await ctx.agent.execute(
+            AgentRequest(prompt="Analyze this repository without modifying it.")
+        )
+        return self.complete(result.output)
+
+workflow = Workflow("claude-process", agent_runtime=runtime)
+workflow.add_step(Analyze)
+run = workflow.run()
+```
+
+`ClaudeCodeRuntime` uses the Claude Agent SDK's `query()` API. Steps keep using the provider-neutral `ctx.agent.execute(...)`; there is no `ctx.claude` facade. `AgentRequest.output_schema` maps to the SDK's JSON-schema structured output, after which PaC still applies its own typed and deterministic domain validation. The adapter maps Claude usage, cost, model, duration, result ID, and session ID into provider-neutral `AgentResult` fields.
+
+Claude session IDs are persisted separately for each workflow run and step, then reused across retries and process restarts. The SDK may also rely on session files local to the Claude Code environment, so multi-machine resume needs shared or custom SDK session storage; persisting the ID alone does not make a session portable.
+
+PaC never selects `bypassPermissions`. SDK permission behavior remains explicit. For unattended read-only workers, a conservative starting point is `permission_mode="dontAsk"`, a narrow `allowed_tools` list, and explicit `disallowed_tools`; review the [Claude Agent SDK permission documentation](https://code.claude.com/docs/en/agent-sdk/permissions) for the exact evaluation rules. Claude tools can create external effects that PaC cannot roll back or make universally exactly once.
+
+See the complete [Claude Code example](examples/claude_code_runtime.py).
 
 ### Deterministic validation and retries
 
