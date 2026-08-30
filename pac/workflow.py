@@ -316,9 +316,17 @@ class Workflow:
                 "workflow_seconds": self.workflow_timeout.total_seconds() if self.workflow_timeout else None,
             },
             "agent_runtime": (
-                f"{type(self._agent_runtime).__module__}.{type(self._agent_runtime).__qualname__}"
+                {
+                    "identity": f"{type(self._agent_runtime).__module__}.{type(self._agent_runtime).__qualname__}",
+                    "config": self._agent_runtime.fingerprint_config(),
+                }
                 if self._agent_runtime is not None
-                else f"{self._runtime_factory.__module__}.{self._runtime_factory.__qualname__}"
+                and hasattr(self._agent_runtime, "fingerprint_config")
+                else (
+                    f"{type(self._agent_runtime).__module__}.{type(self._agent_runtime).__qualname__}"
+                    if self._agent_runtime is not None
+                    else f"{self._runtime_factory.__module__}.{self._runtime_factory.__qualname__}"
+                )
             ),
             "steps": [
                 {
@@ -852,7 +860,14 @@ class Workflow:
             step_id=step_id,
             attempt=claim.attempt,
             iteration=claim.iteration,
+            cwd=self.cwd,
             secrets=secrets,
+            load_session=lambda runtime_name: self.state_store.get_runtime_session(
+                current_run_id, step_id, runtime_name
+            ),
+            save_session=lambda runtime_name, data: self.state_store.set_runtime_session(
+                current_run_id, step_id, runtime_name, data
+            ),
         )
         agent = BoundAgent(runtime, agent_context, self.state_store)
         codex = runtime.bind_step(step_id) if hasattr(runtime, "bind_step") else agent

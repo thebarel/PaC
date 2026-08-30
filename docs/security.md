@@ -23,6 +23,14 @@ Avoid secrets in:
 
 PaC sanitizes documented structured event paths and excludes prompts by default. It cannot sanitize arbitrary logging performed by workflow/provider code.
 
+## Claude Code permissions and sessions
+
+`ClaudeCodeRuntime` uses the Claude Agent SDK and therefore can invoke configured Claude Code tools. PaC does not select `bypassPermissions` by default. Unattended workers should normally combine `permission_mode="dontAsk"` with explicit `allowed_tools` and `disallowed_tools`; an allowlist approves those tools but does not by itself hide every other tool. Use SDK hooks when every invocation requires custom policy enforcement.
+
+Provider transcripts, prompts, tool inputs/results, and CLI stderr are not persisted by the adapter. They may still exist in Claude Code's own session storage or provider systems, so apply the SDK/provider retention controls appropriate to the data. PaC stores only the explicit Claude session ID in its encrypted runtime-session payload.
+
+A session ID may refer to files local to the Claude Code runtime. Multi-machine workers need shared or custom SDK session storage to resume reliably; PaC does not claim the identifier alone makes a session portable. Tool calls can cause external effects before a PaC attempt is acknowledged. Claim expiry, cancellation, and stale-result rejection protect PaC state, not external rollback or exactly-once tool execution.
+
 ## Payload encryption threat model
 
 Optional `AESGCMEncryptionCodec` uses `cryptography`'s AES-256-GCM. A random 96-bit nonce is generated for every write. Authenticated associated data binds ciphertext to its logical storage location. Envelopes record format and key ID, never key bytes.

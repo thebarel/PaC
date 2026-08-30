@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, Mapping, Protocol
 
 from ..models import JsonValue
@@ -52,6 +54,16 @@ class AgentResult:
         return self.invocation_id
 
 
+def _no_session(runtime: str) -> JsonValue | None:
+    del runtime
+    return None
+
+
+def _cannot_save_session(runtime: str, value: JsonValue) -> None:
+    del value
+    raise RuntimeError(f"Runtime session persistence is unavailable for {runtime!r}")
+
+
 @dataclass(frozen=True, slots=True)
 class AgentExecutionContext:
     workflow_id: str
@@ -60,6 +72,9 @@ class AgentExecutionContext:
     attempt: int
     iteration: int
     secrets: SecretResolver
+    cwd: Path = Path(".")
+    load_session: Callable[[str], JsonValue | None] = _no_session
+    save_session: Callable[[str, JsonValue], None] = _cannot_save_session
 
 
 @dataclass(frozen=True, slots=True)

@@ -45,6 +45,12 @@ class BoundAgent:
                 if request.timeout_seconds is None
                 else await asyncio.wait_for(invocation, timeout=request.timeout_seconds)
             )
+        except asyncio.CancelledError:
+            if self._store is not None:
+                self._store.finish_agent_invocation(
+                    invocation_id, error="CancelledError: agent invocation cancelled"
+                )
+            raise
         except Exception as exc:
             if self._store is not None:
                 self._store.finish_agent_invocation(
