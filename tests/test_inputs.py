@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from pac import (
+    StateStoreError,
     Step,
     Workflow,
     WorkflowDefinitionChanged,
@@ -98,6 +99,7 @@ def test_sqlite_store_migrates_pre_input_schema(tmp_path):
     SQLiteStateStore(database)
     with sqlite3.connect(database) as connection:
         connection.execute("ALTER TABLE step_runs DROP COLUMN inputs_json")
+        connection.execute("DELETE FROM pac_schema_migrations WHERE version >= 2")
 
     SQLiteStateStore(database)
     with sqlite3.connect(database) as connection:
@@ -105,3 +107,36 @@ def test_sqlite_store_migrates_pre_input_schema(tmp_path):
             row[1] for row in connection.execute("PRAGMA table_info(step_runs)").fetchall()
         }
     assert "inputs_json" in columns
+
+
+def test_sqlite_store_records_versioned_migrations(tmp_path):
+    database = tmp_path / "state.db"
+    SQLiteStateStore(database)
+
+    with sqlite3.connect(database) as connection:
+        migrations = connection.execute(
+            "SELECT version, name, checksum FROM pac_schema_migrations ORDER BY version"
+        ).fetchall()
+        run_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(workflow_runs)").fetchall()
+        }
+        event_columns = {
+            row[1] for row in connection.execute("PRAGMA table_info(events)").fetchall()
+        }
+
+    assert [row[0] for row in migrations] == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert all(len(row[2]) == 64 for row in migrations)
+    assert {"definition_format_version", "state_format_version"} <= run_columns
+    assert "schema_version" in event_columns
+
+
+def test_sqlite_store_rejects_edited_migration_history(tmp_path):
+    database = tmp_path / "state.db"
+    SQLiteStateStore(database)
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "UPDATE pac_schema_migrations SET checksum = 'changed' WHERE version = 1"
+        )
+
+    with pytest.raises(StateStoreError, match="does not match installed history"):
+        SQLiteStateStore(database)

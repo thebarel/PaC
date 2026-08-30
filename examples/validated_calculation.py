@@ -15,8 +15,13 @@ class Calculate(Step):
         return None
 
 
-workflow = Workflow("validated-calculation", cwd=".")
-workflow.add_step(Calculate)
-result = workflow.loop()
-print(result.output(Calculate))
+def main():
+    workflow = Workflow("validated-calculation", cwd=".")
+    workflow.add_step(Calculate)
+    result = workflow.loop()
+    print(result.output(Calculate))
+
+
+if __name__ == "__main__":
+    main()
 

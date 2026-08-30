@@ -1,239 +1,469 @@
-# PaC - Process as Code
+# PaC — Process as Code
 
-PaC is a small durable workflow engine for agentic work. Workflows are ordinary Python code; PaC owns deterministic scheduling, dependencies, transitions, retries, persistence, recovery, and Codex thread lifecycle.
+PaC is a small durable workflow runtime for ordinary Python, AI agents, humans, external events, and timers.
 
-> PaC does not make language-model generation deterministic. It makes the process around agent execution deterministic: scheduling, dependencies, state transitions, retries, persistence, validation decisions, and replay decisions.
-
-## Personal Note
-This library was created with [flowboard](https://github.com/thebarel/flowboard) to create agentic workflows in a blink of an eye.
-I must say, I used it few times, and it worked like a charm. My process was:
-- Create the workflow design via `flowboard`
-- Export it to PaC code (via the export button)
-- Launch an AI agent in plan mode and telling it to fill the todos
-- Answering all the questions about each node in the workflow
-- Creating a fully working workflow - with deterministic steps
-
-Currently, `PaC` only supports `codex` as its harness.
-
-I really think that what makes this so code is the output validation, you can make sure that your agent is REALLY doing what it is supposed to do.
-
-## Installation
-
-PaC requires Python 3.11 or newer and uses the official Python Codex SDK.
-
-```bash
-git clone https://github.com/thebarel/PaC.git
-cd PaC
-python3 -m venv .venv
-source .venv/bin/activate
-pip3 install -e .
+```text
+nondeterministic intelligence
+         inside
+deterministic process execution
 ```
 
-The SDK controls a local Codex app-server and uses your normal Codex authentication.
+PaC does **not** try to make a model deterministic. It makes the process around model calls explicit and durable: dependencies, scheduling, state transitions, validation, retries, bounded cycles, waits, worker claims, and audit events.
 
------
-## First workflow
+Agents are actors inside the process. They are not the process itself.
+
+## Why PaC
+
+A `Step` returns an explicit outcome. PaC persists that outcome before releasing downstream work. Candidate AI output crosses deterministic validation before it becomes durable state. A process can stop for a signal, timer, or human decision and resume after a restart. Independent DAG branches can run concurrently, while registration order remains the deterministic claim order.
+
+The local path stays small:
 
 ```python
-from pac import Workflow, Step
+from pac import Step, Workflow
 
-
-class First(Step):
+class Hello(Step):
     def run(self, ctx):
         return self.complete("hello")
 
-
-class Second(Step):
-    def run(self, ctx):
-        first = ctx.output(First)
-        return self.complete(first + " world")
-
-
-workflow = Workflow("demo")
-workflow.add_step(First)
-workflow.add_step(Second, depends_on=[First])
-
-run = workflow.loop()
-assert run.output(Second) == "hello world"
+workflow = Workflow("hello")
+workflow.add_step(Hello)
+run = workflow.run()
+print(run.output(Hello))
 ```
 
-Steps are registered as classes and instantiated by the framework. Their default stable identity is `module + qualname`. Outputs must be JSON-compatible; PaC never uses pickle.
+SQLite at `.pac/state.db` is the default. Async execution, workers, PostgreSQL, encryption, agent runtimes, schemas, and exporters are opt-in.
 
-## Step inputs and outputs
+## Installation
 
-Pass durable, step-specific inputs when registering the step:
+PaC requires Python 3.11 or newer.
+
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Optional integrations:
+
+```bash
+pip install -e '.[codex]'       # official Codex adapter
+pip install -e '.[postgres]'    # psycopg 3 backend
+pip install -e '.[encryption]'  # AES-256-GCM payload encryption
+pip install -e '.[otel]'        # OpenTelemetry event exporter
+pip install -e '.[dev]'         # tests and development tools
+```
+
+## Architecture
+
+```text
+                         Workflow definition
+                  (steps, dependencies, cycles, schemas)
+                                  |
+                     deterministic scheduler
+                                  |
+              +-------------------+-------------------+
+              |                   |                   |
+         Python Step          Agent Step       Human Approval
+              |                   |                   |
+              |              AgentRuntime             |
+              |          +--------+--------+           |
+              |          |        |        |           |
+              |       Codex     Fake     Custom         |
+              +-------------------+-------------------+
+                                  |
+              typed codec -> deterministic validators
+                                  |
+                   transactional durable state
+                                  |
+          events / usage / signals / timers / idempotency
+                                  |
+             local runner or leased multi-worker execution
+                                  |
+                     SQLite or PostgreSQL
+```
+
+The main boundaries are deliberately separate:
+
+- **Definition** — registered step classes, inputs, dependencies, validators, cycles, and behavioral fingerprint.
+- **Scheduling** — computes an ordered runnable set from persisted state.
+- **Execution** — invokes sync or async Python and acknowledges the exact claimed attempt.
+- **Agent runtime** — translates provider-neutral requests/results to a provider.
+- **Persistence** — commits transitions and contiguous per-run events transactionally.
+- **Interaction** — durable signals, timers, approvals, cancellation, and timeouts.
+- **Observability** — structured events, invocation usage, and post-commit exporters.
+
+See [Architecture and guarantees](docs/architecture.md) for invariants and non-guarantees.
+
+## Core API
+
+### Steps, inputs, outputs, and dependencies
 
 ```python
-class RootDomain(Step):
+from pac import Step, Workflow
+
+class Produce(Step):
     def run(self, ctx):
-        company = ctx.input("company")
-        timeout = ctx.input("timeout_seconds", 30)
+        subject = ctx.input("subject")
+        return self.complete({"message": f"hello {subject}"})
 
-        return self.complete(
-            {
-                "company": company,
-                "timeout_seconds": timeout,
-            }
-        )
+class Consume(Step):
+    def run(self, ctx):
+        produced = ctx.output(Produce)
+        return self.complete(produced["message"].upper())
 
-
-workflow.add_step(
-    RootDomain,
-    inputs={
-        "company": "Acme",
-        "timeout_seconds": 20,
-    },
-)
+workflow = Workflow("minimal")
+workflow.add_step(Produce, inputs={"subject": "world"})
+workflow.add_step(Consume, depends_on=[Produce])
+run = workflow.run()
 ```
 
-`inputs` must be a mapping with string keys and JSON-compatible values. PaC snapshots inputs at registration, persists them in SQLite, and includes non-empty inputs in the workflow-definition fingerprint. Changing an input while a run is unfinished raises `WorkflowDefinitionChanged`; it never silently resumes with new configuration.
-
-Inside a step:
-
-- `ctx.input("name")` returns a required input and raises a clear `KeyError` when missing.
-- `ctx.input("name", default)` returns the default when the input is absent.
-- `ctx.inputs` exposes all inputs for the current step as a read-only mapping.
-- `ctx.output(OtherStep)` returns the persisted output of a registered, completed step.
-
-Inputs are configuration supplied by the workflow author. Outputs are runtime results supplied by completed steps. To make an upstream output available, declare the dependency explicitly:
-
-```python
-class CertificateLookup(Step):
-    def run(self, ctx):
-        discovery = ctx.output(RootDomain)
-        domains = discovery["domains"]
-        return self.complete({"searched_domains": domains})
-
-
-workflow.add_step(RootDomain, inputs={"company": "Acme"})
-workflow.add_step(CertificateLookup, depends_on=[RootDomain])
-```
-
-Inputs and outputs are stored unencrypted in the configured state database and may appear in events. Do not place passwords, API keys, or other secrets in them.
-
-## Lifecycle and dependencies
+Steps are registered as classes and instantiated without constructor arguments. The default identity is `module.qualname`. Untyped values must be strict JSON: no pickle, non-string object keys, NaN, infinity, or arbitrary objects.
 
 A step returns one explicit result:
 
 ```python
 return self.complete(value)
-return self.retry("try again")
-return self.wait("waiting for an external condition")
-return self.fail("cannot continue")
+return self.retry("reason")
+return self.wait("manual pause")
+return self.wait(signal="payment_received")
+return self.wait_until(timestamp)
+return self.wait_for(duration)
+return self.repeat(value, reason="another bounded cycle pass")
+return self.fail("reason")
 ```
 
-The lifecycle is `PENDING -> RUNNING`, followed by `COMPLETED`, `WAITING`, `RETRY`, `REPEAT`, or `FAILED`. Completed acyclic steps never run again in the same workflow run; explicitly declared cycle members reset when their controller requests another iteration.
+`ctx.input()`, `ctx.output()`, `ctx.latest_output()`, `ctx.state()`, `ctx.attempt`, `ctx.iteration`, and `ctx.retry_reason` expose explicit persisted process state.
 
-Dependencies must complete successfully before a step is runnable. If several steps are eligible, PaC always selects registration order. Execution is intentionally sequential in v1.
+### Typed contracts
 
-## Cyclic workflows
-
-Cycles are explicit so an accidental dependency cycle cannot run forever. Declare forward dependencies normally, omit the feedback edge from `depends_on`, and register it separately:
+Typed contracts are optional. Dataclasses, standard scalar/container annotations, enums, UUID/date/time values, and Pydantic v2 models (when installed) are supported.
 
 ```python
-class Draft(Step):
-    def run(self, ctx):
-        feedback = ctx.latest_output(Review, None)
-        return self.complete({"iteration": ctx.iteration, "feedback": feedback})
+from dataclasses import dataclass
+from pac import Step
 
+@dataclass
+class ResearchInput:
+    topic: str
 
-class Review(Step):
-    def run(self, ctx):
-        draft = ctx.output(Draft)
-        if ctx.iteration < 3:
-            return self.repeat({"requested_changes": ["add evidence"]}, reason="revise")
-        return self.complete({"approved": True, "draft": draft})
+@dataclass
+class ResearchOutput:
+    findings: list[str]
+    confidence: float
 
-
-workflow.add_step(Draft)
-workflow.add_step(Review, depends_on=[Draft])
-workflow.add_cycle(
-    "review",
-    steps=[Draft, Review],
-    back_edge=(Review, Draft),
-    max_iterations=5,
-)
+class Research(Step[ResearchInput, ResearchOutput]):
+    def run(self, ctx, inputs: ResearchInput):
+        return self.complete(
+            ResearchOutput([f"finding about {inputs.topic}"], 0.9)
+        )
 ```
 
-The back edge is `(Controller, Entry)`. `repeat(value, reason=...)` persists JSON feedback and resets the members for the next pass. `complete(value)` exits the cycle. `ctx.latest_output()` reads the latest persisted value even after a member resets, while `ctx.output()` still requires a currently completed step. Attempts restart at 1 each iteration, the controller's Codex thread is reused, and exceeding `max_iterations` fails the workflow.
+Inputs are validated while building the definition. Outputs are validated and encoded before successful completion is persisted. Schema-free JSON workflows remain unchanged.
 
-Cycle members may contain forward branches and joins, but cannot overlap another cycle. The entry must reach every member and every member must reach the controller. A raw cycle made only with `depends_on` remains a definition error.
+### AI through `AgentRuntime`
 
-## Validating statistical agent output
+Core process logic has no provider-specific request or response type:
 
-A successful Codex turn is only a candidate result. Use deterministic Python validation when the workflow requires a specific semantic outcome:
+```python
+from pac import AgentResult, FakeAgentRuntime, Step, Workflow
+
+runtime = FakeAgentRuntime([AgentResult("candidate", provider="fake")])
+
+class Ask(Step):
+    async def run(self, ctx):
+        result = await ctx.agent.execute("Summarize the evidence")
+        return self.complete(result.output)
+
+workflow = Workflow("agent-example", agent_runtime=runtime)
+workflow.add_step(Ask)
+run = workflow.run()
+```
+
+Implementing a custom runtime is one async method:
+
+```python
+class MyRuntime:
+    async def execute(self, request, context):
+        # Resolve credentials at execution time; call the provider here.
+        return AgentResult(output="...", provider="my-provider", model=request.model)
+```
+
+`AgentResult` can carry provider-neutral token, cost, and latency metadata. The deterministic `FakeAgentRuntime` keeps tests independent of live APIs. `CodexRuntime` remains available, and legacy `ctx.codex.run(...)` is retained as a compatibility facade.
+
+### Deterministic validation and retries
+
+```text
+candidate output -> typed/JSON validation -> deterministic validators
+                                            | accept -> persist completion
+                                            ` reject -> persist reason -> retry
+```
 
 ```python
 class Calculate(Step):
     max_attempts = 3
 
     def run(self, ctx):
-        result = ctx.codex.run("Calculate 6 * 7. Return only the number.")
-        return self.complete(result.text)
+        return self.complete("41" if ctx.attempt == 1 else "42")
 
     def validate_output(self, output, ctx):
-        if output != "42":
-            return f"Expected 42, received {output!r}"
-        return None
+        return None if output == "42" else f"Expected 42, got {output!r}"
 ```
 
-`None` accepts the candidate. A non-empty reason rejects it. PaC records the rejected candidate and reason, then retries the whole step while attempts remain. `ctx.retry_reason` exposes the last reason so the next prompt can include feedback. If every candidate is rejected, the step and workflow fail rather than accepting an unwanted answer.
+A rejected candidate and reason are recorded. The next attempt receives `ctx.retry_reason`. Exhaustion fails the step and run. `SchemaValidator`, `FunctionValidator`, and `CompositeValidator` add reusable validation while preserving `validate_output()`.
 
-JSON Schema controls structure, while `validate_output` controls domain meaning:
+### Async and parallel DAG execution
+
+Both sync and native async steps are supported. Sync steps execute through a thread so they do not block the async scheduler.
 
 ```python
-result = ctx.codex.run(
-    "Analyze the repository.",
-    output_schema={
-        "type": "object",
-        "properties": {"summary": {"type": "string"}},
-        "required": ["summary"],
-    },
+workflow = Workflow("parallel", max_concurrency=3)
+workflow.add_step(ResearchA)
+workflow.add_step(ResearchB)
+workflow.add_step(ResearchC)
+workflow.add_step(Synthesis, depends_on=[ResearchA, ResearchB, ResearchC])
+run = await workflow.arun()
+```
+
+The runnable set and claim order are deterministic by registration order. Independent claims execute concurrently; wall-clock completion order is intentionally not deterministic. `Synthesis` cannot run until every dependency commits completion.
+
+Use `run()/resume()/loop()` from synchronous code and `arun()/aresume()/aloop()` inside an event loop.
+
+### Explicit bounded cycles
+
+Cycles remain declared, bounded, fingerprinted, observable, and resumable:
+
+```python
+workflow.add_step(Draft)
+workflow.add_step(Review, depends_on=[Draft])
+workflow.add_cycle(
+    "review",
+    steps=[Draft, Review],
+    back_edge=(Review, Draft),  # controller -> entry
+    max_iterations=5,
 )
 ```
 
-Validators must themselves be deterministic. An LLM judge can still vary and therefore cannot provide the same guarantee.
+Only the controller may return `repeat()`. Attempts reset for a new iteration; `ctx.latest_output()` can read prior-iteration feedback. Accidental graph cycles are definition errors, and exceeding the bound fails the run.
 
-## `Workflow.loop()`
+### Explicit run identity and restart
 
-`loop()` is a reconciliation engine, not an unconditional Python loop. It repeatedly loads persisted state, selects one eligible step, records `RUNNING`, invokes it, and atomically persists the result and event. It stops when the workflow completes, fails, waits, or deadlocks.
+```python
+run = workflow.start()       # create only
+workflow.resume(run.id)      # execute a specific persisted run
+workflow.run()               # create and execute a new run
+workflow.loop(run_id=run.id) # compatibility reconciliation API
+```
 
-The return value is a `WorkflowRun` containing its ID, status, step snapshots, outputs, and ordered event log. Failures raise `WorkflowFailed`, whose `.run` contains the failed snapshot.
+Many active runs of the same workflow may coexist. A workflow object remembers the run it created. After process restart, implicit `loop()` resumes only when exactly one compatible active run exists; otherwise pass a run ID. An unfinished run whose behavioral fingerprint changed is refused with `WorkflowDefinitionChanged`.
 
-## Persistence and resume
+If a process dies after a claim, its lease can expire and recovery consumes that attempt before retrying. Completed steps are not repeated. See [Crash recovery](examples/crash_recovery.py).
 
-The default database is `<cwd>/.pac/state.db`; pass `state_path=` or a `StateStore` to configure it. PaC resumes the latest unfinished run with the same workflow name. Once a run is terminal, another `loop()` call creates a new run.
+### Durable external signals
 
-Every event has a monotonically increasing sequence number within its run. Timestamps are metadata, never ordering keys.
+```python
+class AwaitPayment(Step):
+    def run(self, ctx):
+        if ctx.signal_payload is None:
+            return self.wait(signal="payment_received", payload_type=dict)
+        return self.complete(ctx.signal_payload)
 
-If a process stops while a step is `RUNNING`, the next process records a recovery and retries it if attempts remain. The interrupted attempt is consumed. PaC cannot guarantee exactly-once external side effects: a crash after Codex performs work but before PaC persists completion may repeat work.
+waiting = workflow.run()
+workflow.signal(
+    waiting.id,
+    "payment_received",
+    {"payment_id": "pay_123"},
+    event_id="provider-event-123",
+    actor={"service": "billing"},
+)
+completed = workflow.resume(waiting.id)
+```
 
-The declarative workflow structure is fingerprinted. PaC refuses to resume an unfinished run if ordered steps, dependencies, step inputs, retry limits, working directory, model, or sandbox changed. Python source is not hashed in v1.
+Signals are durable, auditable, may arrive before the wait, and are idempotent when `event_id` is supplied. Core PaC does not include an HTTP server. A webhook handler only needs to call `workflow.signal(...)`; see [External signal example](examples/external_signal.py).
 
-## Waiting
+### Durable timers
 
-`self.wait(...)` pauses the workflow without spinning. PaC first runs any other eligible work, then returns a run with status `WAITING`. Calling `loop()` again explicitly resumes waiting steps. Waiting remains within the same logical attempt and does not consume retry quota.
+```python
+return self.wait_for(timedelta(minutes=15))
+# or
+return self.wait_until(datetime(..., tzinfo=UTC))
+```
 
-## Codex integration
+Timer deadlines survive process termination. Stores expose `process_due_waits()`, `ready_runs()`, and `next_wakeup_at()` so a worker can sleep until the next deadline instead of busy polling.
 
-Each step gets its own Codex thread within a workflow run. Retries and later turns reuse that thread; unrelated steps never share hidden conversation state. Explicit information passes through persisted step outputs.
+### Human approval
 
-PaC lazily starts one official `openai_codex.Codex` client for a `loop()` invocation and closes it afterward. Pure Python workflows do not start Codex. Workflow-level `cwd`, `model`, and `sandbox` values are applied to step threads.
+```python
+class SecurityReview(HumanApproval):
+    payload_type = dict[str, str]
+    timeout = timedelta(hours=24)
 
-See [examples/repository_improvement.py](examples/repository_improvement.py), [examples/validated_calculation.py](examples/validated_calculation.py), and [examples/recon.py](examples/recon.py).
+waiting = workflow.run()
+workflow.approve(
+    waiting.id,
+    SecurityReview,
+    payload={"ticket": "CHG-42"},
+    comment="reviewed",
+    actor={"id": "alice"},
+    event_id="approval-42",
+)
+completed = workflow.resume(waiting.id)
+```
 
-## Complete authoring reference for agents
+`reject(...)` records the actor/reason and fails the run by default. For explicit narrow routing, declare `depends_on=[approved(SecurityReview)]`, `depends_on=[rejected(SecurityReview)]`, or `depends_on=[timed_out(SecurityReview)]`; unselected branches are persisted as `SKIPPED`. Set `route_timeout = True` on a gate that uses a timeout route. Approval and named-signal payloads are type-validated when declared. There is no built-in UI; CLIs, services, or applications call the programmatic API.
 
-[docs/workflow-authoring.md](docs/workflow-authoring.md) is the normative workflow-authoring guide. It documents constructor arguments, step registration, inputs, dependency outputs, context capabilities, results, validation, retries, waiting, Codex calls, persistence, errors, and a generation checklist. Give that file to an agent that needs to produce PaC workflows.
+### Idempotent external actions
 
-## Current limitations
+```python
+class Charge(Step):
+    max_attempts = 3
 
-- Sequential, synchronous execution only
-- JSON-compatible outputs only
-- Bounded retries; valid model output is not guaranteed
-- Waiting requires an explicit later `loop()` call
-- No timers, webhooks, queues, parallel workers, or distributed execution
-- One active process may execute a given workflow name at a time
-- No workflow-definition migration or Python source hashing
-- No exactly-once guarantee for external side effects
-- One explicit feedback edge/controller per non-overlapping cycle
+    def run(self, ctx):
+        key = ctx.idempotency_key_for("charge")
+        receipt = payment_api.charge(order_id="o-1", idempotency_key=key)
+        return self.complete(receipt)
+```
+
+The logical key is stable across retries of the same step iteration. `ctx.attempt_idempotency_key` changes per attempt. `ctx.once("name", fn)` and `await ctx.once_async(...)` persist JSON results for local duplicate suppression.
+
+**This is not universal exactly-once execution.** A crash can occur after an external effect but before local completion. Pass PaC's stable key to the external system's own idempotency mechanism whenever possible.
+
+### Secrets
+
+```python
+from pac import SecretRef
+
+workflow.add_step(CallAPI, inputs={"credential": SecretRef("STRIPE_API_KEY")})
+
+class CallAPI(Step):
+    def run(self, ctx):
+        token = ctx.secrets.get(ctx.input("credential"))
+        client = Client(api_key=token.reveal())
+        return self.complete("called")
+```
+
+The default `EnvironmentSecretProvider` resolves references at execution time. `SecretValue` prints as `***`. Only references are persisted and fingerprinted. Implement `SecretProvider.resolve()` for AWS Secrets Manager, GCP Secret Manager, Vault, Kubernetes Secrets, or another source.
+
+### Optional encrypted persistence
+
+```python
+from pac import AESGCMEncryptionCodec, EnvironmentEncryptionKeyProvider, SQLiteStateStore
+
+keys = EnvironmentEncryptionKeyProvider(active_key_id="2026_08")
+store = SQLiteStateStore("state.db", payload_codec=AESGCMEncryptionCodec(keys))
+workflow = Workflow("secure", state_store=store)
+```
+
+Set `PAC_ENCRYPTION_KEY_2026_08` to a base64-encoded 32-byte key. Payloads use authenticated AES-256-GCM envelopes; key material is never stored beside ciphertext. Inputs, outputs, event data, signals, approvals, sessions, rejected candidates, and idempotency results are encrypted. Scheduling metadata—IDs, names, statuses, event types, timestamps, leases, and wake times—remains visible so workers can query it.
+
+Keep old keys available while reading old rows; new writes use `active_key_id`. `reencrypt()` supports explicit rotation tooling. Encryption protects persisted payloads, not plaintext in process memory, malicious workflow code, query metadata, backups containing external keys, or secrets put into names.
+
+### Workers and PostgreSQL
+
+Local execution uses the same durable claim protocol as worker execution. Each claim has an owner, token, attempt, iteration, and lease. Completion is accepted only for the matching live claim.
+
+```python
+registry = WorkflowRegistry([workflow])
+worker = Worker(registry, worker_id="worker-1", max_concurrency=8)
+run = worker.run_sync(run_id)
+# Or use await worker.run_once() / await worker.run_forever(stop=shutdown_event)
+# to discover ready runs, recover leases, process timers, and heartbeat.
+```
+
+SQLite uses WAL, `BEGIN IMMEDIATE`, and conditional updates and is a strong local/default backend. `PostgreSQLStateStore` uses row locking and `FOR UPDATE SKIP LOCKED` for multi-process/multi-machine claiming. Install the `postgres` extra. Distributed claims should only be considered production-validated after running PaC's PostgreSQL integration tests against the deployment's PostgreSQL version and topology.
+
+### Events, tracing, and usage
+
+Every run has a transactionally ordered audit stream. Event sequence—not timestamp—is authoritative. Events cover workflow, runnable/claim/start, agent calls, validation, retries, waits, signals, timers, approvals, cycles, recovery, completion, failure, and cancellation. Full prompts and resolved secrets are omitted by default.
+
+```python
+usage = workflow.state_store.usage(run.id)
+invocations = workflow.state_store.agent_invocations(run.id)
+
+cursor = EventExportCursor(
+    workflow.state_store,
+    LoggingExporter(),
+    name="logging",
+)
+cursor.export_run(run.id)
+```
+
+The cursor advances only after export succeeds. Optional `OpenTelemetryExporter` maps events to spans. Usage fields are nullable because providers do not report the same data; mixed-currency costs are not falsely summed.
+
+### CLI
+
+```bash
+pac --db .pac/state.db runs
+pac --db .pac/state.db inspect RUN_ID
+pac --db .pac/state.db events RUN_ID
+pac --db .pac/state.db signal RUN_ID payment_received --payload '{"id":"pay_1"}' --event-id evt_1
+pac --db .pac/state.db cancel RUN_ID --reason 'operator request'
+pac --db .pac/state.db workers
+pac --db .pac/state.db rotate-key 2026_09
+pac --db .pac/state.db validate myapp.workflows:build_workflow
+pac --db .pac/state.db resume myapp.workflows:build_workflow RUN_ID
+pac --db .pac/state.db retry myapp.workflows:build_workflow RUN_ID module.Step
+pac --db .pac/state.db worker myapp.workflows:build_workflow RUN_ID
+```
+
+Commands that execute code require a `module:attribute` yielding a `Workflow`; persisted records are never treated as executable Python.
+
+## Cancellation and timeouts
+
+`workflow.cancel(run_id, reason=..., actor=...)` durably cancels pending, retrying, and waiting work and invalidates live claims. Async tasks receive cancellation/timeout behavior promptly. Sync code can call `ctx.cancelled` or `ctx.check_cancelled()` cooperatively.
+
+PaC cannot safely force-kill arbitrary Python or undo side effects already performed. A timed-out synchronous thread may continue in memory, but its invalidated/stale claim cannot commit a later transition.
+
+Configure workflow/step limits on `Workflow(..., workflow_timeout=..., step_timeout=...)`, an agent limit on `AgentRequest(timeout_seconds=...)`, and signal/human limits through wait/approval configuration. Wait timeout actions are explicit: fail, retry, cancel, or resume.
+
+## Fingerprints and migrations
+
+Behavioral fingerprints cover workflow and step versions, graph/order/dependencies, retry and timeout configuration, cycles, canonical inputs, schemas, validators, runtime binding, secret references (never values), and Python implementation identity. PaC prefers explicit versions, then normalized source, stable code-object data, and module-file fallback. It refuses unsafe unfinished-run resumes.
+
+Fingerprinting detects covered changes; it does **not** capture every transitive dependency, external service, interpreter behavior, environment variable, model behavior, or prove reproducibility.
+
+SQLite migrations are ordered and checksum-protected. Existing unversioned PaC databases are detected and upgraded in place. Back up durable databases before application/library upgrades. Definition, persisted-state, event, and encryption-envelope versions are separate.
+
+See [Migration guide](docs/migration.md).
+
+## Guarantees and non-guarantees
+
+PaC guarantees, for a supported and correctly configured store:
+
+- explicit persisted outcomes and per-run transactionally ordered events;
+- dependency barriers and bounded declared cycles;
+- deterministic runnable/claim ordering from committed state;
+- typed/JSON and deterministic validator checks before completion;
+- run isolation, claim-token checks, lease recovery, and durable waits;
+- no resolved secret persistence through the documented secret API.
+
+PaC does not claim:
+
+- deterministic model output;
+- universal exactly-once external side effects;
+- safe forcible cancellation of arbitrary synchronous Python;
+- deterministic wall-clock completion order under concurrency;
+- complete reproducibility from fingerprints;
+- protection of plaintext while executing in memory;
+- distributed safety for untested custom backends or untested deployment environments.
+
+## Documentation and examples
+
+- [Workflow authoring reference](docs/workflow-authoring.md)
+- [Architecture and guarantees](docs/architecture.md)
+- [Operations](docs/operations.md)
+- [Security](docs/security.md)
+- [Migration guide](docs/migration.md)
+- [`examples/`](examples/)
+
+Requested runnable examples:
+
+- [minimal](examples/minimal.py)
+- [typed workflow](examples/typed_workflow.py)
+- [agent runtime](examples/agent_runtime.py)
+- [parallel research](examples/parallel_research.py)
+- [human approval](examples/human_approval.py)
+- [external signal](examples/external_signal.py)
+- [durable timer](examples/durable_timer.py)
+- [idempotent action](examples/idempotent_action.py)
+- [crash recovery](examples/crash_recovery.py)
+- [multi-worker execution](examples/multi_worker.py)

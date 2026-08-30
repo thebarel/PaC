@@ -5,17 +5,22 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "process-as-code"
 version = "0.1.0"
-description = "A durable deterministic workflow runtime for Codex agents"
+description = "A provider-agnostic durable Process-as-Code runtime"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{ name = "PaC contributors" }]
-dependencies = [
-    "openai-codex>=0.147.0,<0.148",
-]
+dependencies = []
+
+[project.scripts]
+pac = "pac.cli:main"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+codex = ["openai-codex>=0.147.0,<0.148"]
+dev = ["mypy>=1.17", "pytest>=8", "ruff>=0.12"]
+encryption = ["cryptography>=42"]
+otel = ["opentelemetry-api>=1.27"]
+postgres = ["psycopg[binary]>=3.2"]
 
 [tool.setuptools.packages.find]
 include = ["pac*"]
@@ -23,3 +28,23 @@ include = ["pac*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["pac"]
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+
+[[tool.mypy.overrides]]
+module = ["cryptography.*", "openai_codex", "opentelemetry.*", "psycopg", "psycopg.*"]
+ignore_missing_imports = true

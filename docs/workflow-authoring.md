@@ -1,56 +1,45 @@
 # PaC Workflow Authoring Reference
 
-This is the normative guide for humans and agents that generate PaC workflows. A generated workflow should follow every rule in the final checklist.
+This is the normative reference for people and code-generating agents that author PaC workflows.
 
 ## Mental model
 
-A PaC program declares a static workflow in Python:
+A workflow is a static Python declaration reconciled against durable state:
 
 1. Define `Step` subclasses.
-2. Register the Step classes on one `Workflow` in deterministic order.
-3. Declare step inputs and dependencies during registration.
-4. Call `workflow.loop()`.
+2. Register the classes in intentional order.
+3. Declare durable inputs, dependencies, validators, and bounded cycles.
+4. Create a run or reconcile an existing run.
+5. Return an explicit result from every invocation.
 
-PaC reconciles that declaration with persisted SQLite state. A completed step is not executed again in the same run. Model text may vary, but PaC deterministically chooses scheduling, transitions, retries, persistence, recovery, and acceptance decisions.
+The model or external service may be nondeterministic. Scheduling from a committed snapshot, transition rules, validation, retry bounds, dependency barriers, and cycle bounds are deterministic.
 
-## Imports and minimal program
+## Minimal definition
 
 ```python
 from pac import Step, Workflow
 
-
 class Produce(Step):
     def run(self, ctx):
-        subject = ctx.input("subject")
-        return self.complete({"subject": subject, "value": "result"})
-
+        return self.complete({"value": ctx.input("value")})
 
 class Consume(Step):
     def run(self, ctx):
-        produced = ctx.output(Produce)
-        return self.complete(produced["value"])
+        return self.complete(ctx.output(Produce)["value"])
 
-
-def main():
-    workflow = Workflow("example", cwd=".")
-    workflow.add_step(Produce, inputs={"subject": "Acme"})
+def build_workflow():
+    workflow = Workflow("example")
+    workflow.add_step(Produce, inputs={"value": 42})
     workflow.add_step(Consume, depends_on=[Produce])
-
-    run = workflow.loop()
-    print(run.id)
-    print(run.status)
-    print(run.output(Consume))
-
+    return workflow
 
 if __name__ == "__main__":
-    main()
+    print(build_workflow().run().output(Consume))
 ```
 
-Always register the class (`Produce`), not an instance (`Produce()`). PaC owns instantiation, so steps should not require constructor arguments.
+Register classes, not instances. Steps must not require constructor arguments.
 
 ## `Workflow`
-
-Constructor:
 
 ```python
 Workflow(
@@ -61,36 +50,44 @@ Workflow(
     sandbox=None,
     state_path=None,
     state_store=None,
+    agent_runtime=None,
+    secret_provider=None,
+    max_concurrency=1,
+    worker_id=None,
+    lease_duration=timedelta(minutes=2),
+    step_timeout=None,
+    workflow_timeout=None,
     codex_runtime_factory=CodexRuntime,
+    version=None,
 )
 ```
 
-- `name`: non-empty stable workflow name. It identifies runs in the state database.
-- `cwd`: repository directory used by Codex. The default state path is `<cwd>/.pac/state.db`.
-- `model`: optional Codex model passed to every step thread.
-- `sandbox`: optional `openai_codex.Sandbox` preset.
-- `state_path`: optional SQLite path.
-- `state_store`: optional `StateStore`; do not pass it together with `state_path`.
-- `codex_runtime_factory`: test seam for a fake Codex runtime. Normal workflows should omit it.
+- `name` is the stable process-definition name.
+- `version` is an optional explicit semantic identity included in the fingerprint.
+- `state_path` selects SQLite. `state_store` injects SQLite, PostgreSQL, or a custom store; pass only one.
+- `agent_runtime` injects the provider-neutral runtime used by `ctx.agent`.
+- `secret_provider` defaults to environment variables.
+- `max_concurrency` bounds claims executed by this runner.
+- `worker_id` and `lease_duration` identify and protect claimed work.
+- `step_timeout` and `workflow_timeout` are durable configuration and fingerprint inputs.
+- `cwd`, `model`, `sandbox`, and `codex_runtime_factory` retain Codex compatibility.
 
-`loop()` resumes the latest unfinished run of the same name. If no unfinished run exists, it creates a new run. A call after completion or failure creates a new run.
-
-Explicit cycles are registered after their member steps:
+Run APIs:
 
 ```python
-workflow.add_cycle(
-    "review",
-    steps=[Draft, Review],
-    back_edge=(Review, Draft),  # (Controller, Entry)
-    max_iterations=10,
-)
+created = workflow.start()             # persist only
+completed = workflow.run()             # create + execute
+completed = workflow.resume(run_id)    # explicit existing run
+completed = workflow.loop(run_id)      # compatibility reconciliation
+
+completed = await workflow.arun()
+completed = await workflow.aresume(run_id)
+completed = await workflow.aloop(run_id)
 ```
 
-The ordinary dependencies must remain acyclic and omit the feedback edge. Members cannot overlap cycles. The entry must reach every member through forward dependencies, every member must reach the controller, and `max_iterations` is required and includes the first pass.
+Use async APIs from an active event loop. Multiple active runs may share a workflow name. Implicit `loop()` after restart only works when one compatible active run is unambiguous.
 
 ## `add_step`
-
-Signature:
 
 ```python
 workflow.add_step(
@@ -100,272 +97,263 @@ workflow.add_step(
 )
 ```
 
-Both keyword arguments are optional.
+- Registration order is the deterministic runnable/claim tie-breaker.
+- Dependencies are classes and must be registered.
+- A dependent cannot run until all dependencies have committed `COMPLETED`.
+- Untyped inputs must be a strict JSON object with string keys.
+- Typed input may be a declared dataclass/Pydantic/annotated value and is encoded to canonical JSON.
+- Inputs are snapshotted; changing them changes the definition fingerprint.
+- `SecretRef` is allowed and persists only a reference marker.
 
-### Registration order
+Do not build registration order from an unordered set or unstable filesystem traversal.
 
-Registration order is the only tie-breaker when multiple steps are runnable. Do not generate registrations from an unordered set or filesystem listing. Register them explicitly in intended order.
+## Typed steps
 
-### Dependencies
-
-`depends_on` contains Step classes, not strings or instances. Every dependency must also be registered. Dependency list order does not affect scheduling; PaC normalizes it by registration order.
-
-A dependency must be `COMPLETED` before the dependent step runs. Declare a dependency whenever a step calls `ctx.output(Dependency)`.
-
-### Inputs
-
-`inputs` is a mapping with string keys and JSON-compatible values:
+Schema-free compatibility form:
 
 ```python
-workflow.add_step(
-    Scan,
-    inputs={
-        "company": "Acme",
-        "limit": 100,
-        "enabled": True,
-        "tags": ["external", "dns"],
-        "options": {"timeout": 30},
-        "optional_value": None,
-    },
-)
+class Legacy(Step):
+    def run(self, ctx):
+        return self.complete({"ok": True})
 ```
 
-Allowed values are strings, integers, finite floats, booleans, null/`None`, lists of allowed values, and objects with string keys and allowed values. Unsupported objects, NaN, and infinity raise `WorkflowDefinitionError`.
+Typed form:
 
-PaC canonicalizes and snapshots inputs when `add_step()` is called. Mutating the original Python dictionary afterward does not change the registered inputs. Inputs are persisted and included in the workflow fingerprint. Changing them during an unfinished run raises `WorkflowDefinitionChanged`.
+```python
+@dataclass
+class Input:
+    count: int
 
-Inputs are stored in plaintext SQLite state and registration events. Do not use step inputs for secrets.
+@dataclass
+class Output:
+    doubled: int
+
+class Typed(Step[Input, Output]):
+    def run(self, ctx, inputs: Input):
+        return self.complete(Output(inputs.count * 2))
+```
+
+PaC validates the supported run signatures during definition building. It decodes typed input before invocation, validates output before persistence, and decodes typed dependency values for `ctx.output()`. The public `WorkflowRun.output()` remains JSON-safe persisted data.
+
+Supported codec families include primitive JSON values, dataclasses, typed collections/unions, enums, UUID/date/time values, and Pydantic v2 models when Pydantic is installed. Unsupported annotations fail explicitly. PaC never pickles workflow values.
 
 ## `StepContext`
 
-Every `run()` and `validate_output()` receives a context with:
+Identity and process fields:
 
-- `ctx.workflow_id`: workflow name.
-- `ctx.run_id`: stable workflow-run ID.
-- `ctx.step_id`: stable `module + qualname` step identity.
-- `ctx.attempt`: logical attempt number beginning at 1.
-- `ctx.iteration`: cycle iteration beginning at 1; always 1 outside a cycle.
-- `ctx.retry_reason`: previous explicit retry, validation rejection, or crash-recovery reason; otherwise `None`.
-- `ctx.inputs`: read-only mapping of this step's declared inputs.
-- `ctx.input(name)`: required input lookup. Missing input raises `KeyError` listing available keys.
-- `ctx.input(name, default)`: optional input lookup.
-- `ctx.output(StepClass)`: persisted output of a registered completed step.
-- `ctx.latest_output(StepClass, default)`: latest persisted output even after a cycle reset; without a default, missing output raises `ValueError`.
-- `ctx.state()`: current immutable-style `WorkflowRun` snapshot.
-- `ctx.codex`: the Codex facade bound to this step's private thread.
+- `workflow_id`, `run_id`, `step_id`
+- `attempt`, `iteration`, `retry_reason`
+- `inputs`, `signal_payload`
 
-Prefer required lookups for required configuration:
+State access:
+
+- `ctx.input(name[, default])`
+- `ctx.output(Dependency)` — dependency must currently be completed
+- `ctx.latest_output(Step[, default])` — includes prior cycle iteration output
+- `ctx.state()` — current durable snapshot
+
+Capabilities:
+
+- `ctx.agent` — provider-neutral runtime bound to the invocation
+- `ctx.codex` — legacy Codex facade
+- `ctx.secrets.get(ref)` — execution-time secret resolution
+- `ctx.idempotency_key`, `ctx.attempt_idempotency_key`
+- `ctx.idempotency_key_for(action, attempt_scoped=False)`
+- `ctx.once(action, operation)`, `await ctx.once_async(...)`
+- `ctx.cancelled`, `ctx.check_cancelled()`
+
+A step should read data from declared inputs/dependencies rather than hidden global mutable state.
+
+## Explicit results
 
 ```python
-company = ctx.input("company")
-timeout = ctx.input("timeout_seconds", 30)
+return self.complete(value)
+return self.retry("reason")
+return self.fail("reason")
+return self.wait("manual pause")
+return self.wait(signal="event", timeout=timedelta(hours=1), on_timeout="fail")
+return self.wait_until(aware_datetime)
+return self.wait_for(timedelta(minutes=5))
+return self.repeat(feedback, reason="revise")
 ```
 
-Do not use module globals or environment-dependent values when the value belongs in the durable workflow definition. Put such configuration in `inputs` so resume detects changes.
+- `complete` validates and persists output.
+- `retry` consumes the current attempt and schedules another only within `max_attempts`.
+- `fail` fails the step and then the run.
+- legacy `wait(reason)` is manually resumable and preserves the attempt.
+- named signal/timer waits are condition-specific and durable.
+- `repeat` is legal only for the controller of an explicit cycle.
 
-## Step results
+Unexpected exceptions fail the invocation; they are not silently converted into unbounded retry loops.
 
-`Step.run()` must return exactly one `StepResult` using a helper:
+## Validation
 
-```python
-return self.complete(json_value)
-return self.retry("why another attempt is needed")
-return self.wait("why external progress is required")
-return self.fail("why the workflow cannot continue")
-return self.repeat(json_value, reason="why another cycle pass is needed")
-```
-
-Returning `None`, a raw string, or an `AgentResult` directly is invalid. Complete with the desired JSON-compatible value, commonly `result.text` or a parsed JSON object.
-
-Only the controller of an explicitly declared cycle may return `repeat()`. Repeat values use the same strict JSON serialization and deterministic `validate_output()` checks as completed values. Rejection retries within the current iteration. The controller exits its cycle by returning `complete()`.
-
-`max_attempts` includes the first execution:
+Validation is outside the model by default:
 
 ```python
-class Scan(Step):
+class Reviewed(Step):
     max_attempts = 3
-```
-
-Unexpected exceptions fail the step immediately. They are not automatically retried. Catch only errors that the step can classify and intentionally return `retry()` when appropriate.
-
-## Codex calls
-
-Each step owns one persisted Codex thread within one workflow run. Calls and retries in that step reuse the thread; other steps get separate threads.
-
-```python
-result = ctx.codex.run("Analyze this repository.")
-
-text = result.text
-thread_id = result.thread_id
-turn_id = result.turn_id
-raw_sdk_result = result.raw
-```
-
-For structured generation, pass the Codex JSON Schema directly:
-
-```python
-schema = {
-    "type": "object",
-    "properties": {
-        "company": {"type": "string"},
-        "domains": {
-            "type": "array",
-            "items": {"type": "string"},
-        },
-    },
-    "required": ["company", "domains"],
-    "additionalProperties": False,
-}
-
-result = ctx.codex.run(
-    f"Find the root domains for {ctx.input('company')}.",
-    output_schema=schema,
-)
-```
-
-The PaC result text is still the final response. Parse JSON explicitly and retry malformed responses:
-
-```python
-import json
-
-try:
-    data = json.loads(result.text)
-except (json.JSONDecodeError, TypeError) as exc:
-    return self.retry(f"Codex did not return JSON: {exc}")
-
-return self.complete(data)
-```
-
-Do not complete with `AgentResult` itself because it contains a raw SDK object that is not JSON-serializable.
-
-## Deterministic output validation
-
-Codex completing a turn does not mean its answer satisfies the workflow. Override `validate_output()` for semantic acceptance:
-
-```python
-class Calculate(Step):
-    max_attempts = 3
-
-    def run(self, ctx):
-        feedback = (
-            f" Previous output was rejected: {ctx.retry_reason}"
-            if ctx.retry_reason
-            else ""
-        )
-        result = ctx.codex.run(f"Calculate 6 * 7. Return only the integer.{feedback}")
-        return self.complete(result.text)
 
     def validate_output(self, output, ctx):
-        if output != "42":
-            return f"Expected '42', received {output!r}"
+        if output.get("score", 0) < 0.8:
+            return "score must be at least 0.8"
         return None
 ```
 
-Validation runs after strict JSON serialization and before completion is persisted. Return `None` to accept. Return a non-empty reason string to reject. PaC persists the rejected candidate and reason, then retries if attempts remain. Exhaustion fails the workflow.
+Return `None` to accept or a non-empty reason to reject. Rejection persists the candidate/reason and consumes an attempt. Validator exceptions fail immediately. Validators must be deterministic.
 
-Validators must be deterministic Python logic. Do not call Codex from a validator or use another probabilistic model as the final acceptance authority. Use exact comparisons, parsing, schemas, ranges, checksums, database constraints, or other reproducible rules.
-
-## Passing results between steps
-
-Return structured JSON from producers rather than JSON strings when practical:
+Reusable validators:
 
 ```python
-class RootDomain(Step):
-    def run(self, ctx):
-        company = ctx.input("company")
-        return self.complete({"company": company, "domains": ["a.com", "aa.net"]})
-
-
-class CertificateLookup(Step):
-    def run(self, ctx):
-        discovery = ctx.output(RootDomain)
-        results = {}
-        for domain in discovery["domains"]:
-            results[domain] = lookup(domain)
-        return self.complete(results)
-
-
-workflow.add_step(RootDomain, inputs={"company": "Acme"})
-workflow.add_step(CertificateLookup, depends_on=[RootDomain])
+class Reviewed(Step[Input, Output]):
+    validators = (
+        CompositeValidator([
+            SchemaValidator(Output),
+            FunctionValidator(check_business_rule),
+        ]),
+    )
 ```
 
-PaC v1 has a static graph and no dynamic fan-out. When one step produces a list of domains, process that list sequentially inside a downstream step, or declare a fixed set of downstream Step classes.
+Typed/JSON encoding occurs before successful completion; validators then decide domain acceptance. Validator implementation/configuration contributes to the fingerprint.
 
-## Waiting, failure, and recovery
+## Agent runtimes
 
-- `wait(reason)` records `WAITING` and lets other runnable steps proceed. When none remain, `loop()` returns a `WorkflowRun` with status `WAITING` rather than spinning.
-- A later explicit `loop()` call resumes waiting steps within the same logical attempt.
-- `fail(reason)`, an uncaught exception, rejected output exhaustion, or retry exhaustion marks the workflow failed. `loop()` raises `WorkflowFailed`; inspect `exception.run` for persisted state.
-- A process crash after `RUNNING` was persisted consumes that attempt. Resume records recovery and retries only if attempts remain.
-- PaC cannot guarantee exactly-once external side effects. HTTP calls, file writes, or Codex actions may have completed before a process crash prevented PaC from recording completion.
-
-## Outputs and run inspection
-
-On success or waiting, `loop()` returns `WorkflowRun`:
+Use `ctx.agent` in new workflows:
 
 ```python
-run.id
-run.name
-run.status
-run.steps
-run.cycles
-run.outputs
-run.events
-run.output(StepClass)
+class Ask(Step):
+    async def run(self, ctx):
+        result = await ctx.agent.execute(
+            AgentRequest(
+                prompt="Return a concise answer",
+                model="provider-model",
+                timeout_seconds=30,
+            )
+        )
+        return self.complete(result.output)
 ```
 
-`run.output(StepClass)` requires that the step completed. `run.steps[step_id]` includes attempt, iteration, latest-output presence/value, and the existing step metadata. `run.cycles` contains each cycle's members, controller, entry, current iteration, limit, and status.
+An `AgentRuntime` implements:
 
-Events are append-only and ordered by `sequence`, not timestamp. Important events include workflow creation/start/wait/completion/failure, step registration/start/completion/retry/wait/failure/recovery/output rejection, and Codex thread/turn events.
+```python
+async def execute(request: AgentRequest, context: AgentExecutionContext) -> AgentResult
+```
 
-## Definition and persistence rules
+Provider adapters may manage sessions internally through persisted runtime-session facilities. Do not expose provider SDK objects as process state. `AgentResult.raw` is non-persisted compatibility/debug data.
 
-The default store is `<cwd>/.pac/state.db`. PaC fingerprints:
+Tests should use `FakeAgentRuntime`; never rely on a live model. The Codex adapter retains `ctx.codex.run(prompt, output_schema=...)`, per-step thread reuse, and workflow-level Codex configuration.
 
-- workflow name
-- resolved `cwd`
-- model and sandbox
-- ordered stable step IDs
-- dependencies
-- non-empty step inputs
-- `max_attempts`
-- cycle members, feedback endpoints, and iteration limits
+## Parallel scheduling and claims
 
-Python source code is not fingerprinted. Changing a Step implementation without changing declarative configuration is not detected in v1.
+PaC computes a registration-ordered runnable tuple. A local runner claims at most `max_concurrency` and executes those claims concurrently. Sync functions run in threads; async functions are awaited.
 
-## Errors authors should expect
+Claiming transactionally persists owner, token, attempt, iteration, timestamps, and lease expiry before user code. Every completion/retry/wait/failure acknowledgement must present that token. Expired, cancelled, or old-iteration results cannot mutate state.
 
-- `WorkflowDefinitionError`: invalid name, step, dependency, retry limit, configuration, or inputs.
-- `WorkflowCycleError`: raw `depends_on` cycle; use `add_cycle()` for one feedback edge.
-- `WorkflowDefinitionChanged`: current declaration differs from an unfinished run.
-- `WorkflowFailed`: persisted execution failure; inspect `.run`.
-- `WorkflowDeadlockError`: valid execution cannot make progress.
-- `StepExecutionError`: invalid step return or validator contract.
-- `StepOutputSerializationError`: completed output is not strict JSON.
-- `StateStoreError`: persistence or transition failure.
+Do not infer deterministic completion order. Only runnable/claim order and committed dependency behavior are deterministic.
 
-Catch errors at the workflow boundary, not inside unrelated steps.
+## Signals
 
-## Agent generation checklist
+A signal-aware step must inspect `ctx.signal_payload`:
 
-Before emitting a PaC workflow, verify all of the following:
+```python
+class WaitForCustomer(Step):
+    def run(self, ctx):
+        if ctx.signal_payload is None:
+            return self.wait(signal="customer_response", payload_type=dict)
+        return self.complete(ctx.signal_payload)
+```
 
-1. Import `Step` and `Workflow` from `pac`.
-2. Define every unit of work as a `Step` subclass with `run(self, ctx)`.
-3. Do not require constructor arguments and do not register Step instances.
-4. Register each Step class exactly once and in intentional deterministic order.
-5. Put static per-step configuration in `inputs={...}` and read it with `ctx.input()`.
-6. Use only string input keys and strict JSON-compatible input values.
-7. Declare every data dependency with `depends_on=[...]`.
-8. Read upstream persisted results with `ctx.output(UpstreamStep)`.
-9. Return only `complete`, `retry`, `wait`, `fail`, or controller-only `repeat` results.
-10. Ensure completed values are JSON-compatible; parse agent JSON before completing.
-11. Set a finite `max_attempts` when retry or validation rejection is possible.
-12. Add deterministic `validate_output()` logic for required agent-output properties.
-13. Feed `ctx.retry_reason` into later prompts when corrective feedback helps.
-14. Use `output_schema` for shape and Python validation for meaning.
-15. Add timeouts and status checks to network requests.
-16. Avoid secrets in persisted inputs, outputs, reasons, and events.
-17. Remember that v1 is sequential, synchronous, and statically declared.
-18. Call `workflow.loop()` and inspect the returned `WorkflowRun` or `WorkflowFailed.run`.
-19. For cycles, omit the feedback edge from `depends_on`, declare it with `add_cycle()`, and set a finite iteration limit.
+Submit externally:
+
+```python
+workflow.signal(
+    run_id,
+    "customer_response",
+    payload={"answer": "yes"},
+    event_id="crm-event-17",
+    actor={"service": "crm"},
+)
+```
+
+Signals persist before or after a waiter exists. `event_id` makes receipt idempotent per run/signal. Actor metadata is audit data, not authentication—authenticate in the surrounding application.
+
+## Timers
+
+Use timezone-aware timestamps. A timer remains waiting until `process_due_waits()` observes its deadline. Operational workers should use `next_wakeup_at()` to choose their sleep and `ready_runs()` after processing deadlines. Do not implement a tight `loop()` poll.
+
+## Human approval
+
+```python
+class Approval(HumanApproval):
+    payload_type = dict[str, str]
+    timeout = timedelta(hours=8)
+    timeout_action = TimeoutAction.FAIL
+```
+
+PaC creates a durable human task rather than invoking arbitrary approval code. Submit with `approve()` or `reject()`, including actor, comment/reason, payload, and event ID. Approval resumes and completes the gate; rejection fails by default. Declare narrow deterministic routes with `depends_on=[approved(Gate)]`, `depends_on=[rejected(Gate)]`, or `depends_on=[timed_out(Gate)]`; unselected routes become `SKIPPED`. A timeout route requires `Gate.route_timeout = True`. PaC provides no identity provider or UI.
+
+## Idempotency and effects
+
+Logical keys include run, step, cycle iteration, and action; they remain stable across retries. Attempt keys additionally include attempt.
+
+`ctx.once()` stores a JSON result and prevents concurrent duplicate local execution. It cannot close the crash window between an external effect and local persistence. For payments, email, provisioning, or another remote side effect, send `ctx.idempotency_key_for(action)` to the provider's idempotency API.
+
+## Cancellation and timeout
+
+Cancellation is persisted and prevents future claims/acknowledgements. Async work can stop promptly. Sync work must cooperate with `ctx.check_cancelled()`; a thread may continue but cannot commit with an invalidated claim.
+
+A timed-out external operation might already have caused an effect. Combine timeouts with external idempotency and reconciliation.
+
+Wait timeout actions are `FAIL`, `RETRY`, `CANCEL`, and `RESUME`. Human approvals use the same timeout action model.
+
+## Cycles
+
+```python
+workflow.add_cycle(
+    "review",
+    steps=[Draft, Review],
+    back_edge=(Review, Draft),
+    max_iterations=5,
+)
+```
+
+The normal dependency graph must omit the back edge and remain acyclic. Members cannot overlap cycles. The entry must reach all members and all members must reach the controller. The controller is the only step allowed to `repeat`. The bound includes the first pass.
+
+Cycles work with validation retries, persisted waits, restarts, and forward parallel branches while preserving iteration-specific attempts and idempotency keys.
+
+## Secrets and encryption
+
+Use `SecretRef` in definition data and resolve through `ctx.secrets`. Do not put secret values in inputs, outputs, prompts, error strings, event actors, workflow/step names, or idempotency action names.
+
+Optional `AESGCMEncryptionCodec` encrypts opaque payload columns using an external key provider. Query-critical scheduling metadata remains plaintext. Rotation requires keeping old key IDs available until old ciphertext has been explicitly rewritten.
+
+## Inspection and observability
+
+`WorkflowRun` contains run status, step snapshots, completed outputs, cycles, and ordered events. `WorkflowFailed.run` carries the failed snapshot.
+
+Use store methods for usage and invocation detail. Use `EventExportCursor` for post-commit export; exporter failure must not alter workflow state. Event data is sanitized, but authors still must avoid putting secrets in names and error text.
+
+## Behavioral fingerprints
+
+The fingerprint includes structure, registration order, dependencies, retries, timeouts, cycles, schemas, validator behavior/configuration, runtime binding, canonical inputs, secret references, workflow/step versions, and implementation identity.
+
+Set explicit `Workflow(version=...)` and `Step.version` for intentionally versioned/dynamic code. Explicit step version becomes the implementation identity; change it when behavior changes. Fingerprints are compatibility guards, not full reproducibility proofs.
+
+## Definition checklist
+
+Before running a generated workflow:
+
+- [ ] Every registered item is a `Step` class with no required constructor arguments.
+- [ ] Registration order is explicit and stable.
+- [ ] Every `ctx.output(X)` has a matching `depends_on=[X]` path.
+- [ ] Inputs and outputs are strict JSON or supported typed models.
+- [ ] AI candidates have deterministic validation for required semantics.
+- [ ] `max_attempts`, timeouts, and cycles are bounded.
+- [ ] Cycles are declared with one controller/back edge and a finite maximum.
+- [ ] Async code awaits `ctx.agent.execute()`/`ctx.once_async()`.
+- [ ] Signals and approvals have authenticated surrounding transports and event IDs.
+- [ ] External effects receive PaC idempotency keys where supported.
+- [ ] Secrets use `SecretRef` and are resolved only at execution.
+- [ ] Dynamic/decorated code has explicit semantic versions when source identity is unclear.
+- [ ] Cancellation and timeout limitations are acceptable for each side effect.
+- [ ] Worker deployments use a shared supported store and tested lease settings.
