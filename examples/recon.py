@@ -67,16 +67,20 @@ class CertificateLookup(Step):
         return self.complete(results)
 
 
-workflow = Workflow("recon", cwd=".")
+def main():
+    workflow = Workflow("recon", cwd=".")
+    workflow.add_step(
+        RootDomain,
+        inputs={"company": "Ribbon Communications"},
+    )
+    workflow.add_step(
+        CertificateLookup,
+        depends_on=[RootDomain],
+    )
+    result = workflow.loop()
+    print(result.output(RootDomain))
+    print(result.output(CertificateLookup))
 
-workflow.add_step(
-    RootDomain,
-    inputs={"company": "Ribbon Communications"},
-)
-workflow.add_step(
-    CertificateLookup,
-    depends_on=[RootDomain],
-)
-result = workflow.loop()
-print(result.output(RootDomain))
-print(result.output(CertificateLookup))
+
+if __name__ == "__main__":
+    main()

@@ -1,26 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 from types import TracebackType
 from typing import TYPE_CHECKING, Any, Self
 
 from ..models import JsonValue
 from ..state.base import StateStore
+from .base import AgentExecutionContext, AgentRequest, AgentResult, AgentUsage
 
 if TYPE_CHECKING:
-    from openai_codex import Sandbox, TurnResult
+    from openai_codex import Sandbox
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True, slots=True)
-class AgentResult:
-    text: str | None
-    thread_id: str
-    turn_id: str
-    raw: TurnResult
 
 
 class _StepCodex:
@@ -91,13 +84,18 @@ class CodexRuntime:
 
         client = self._ensure_client()
         state = self._store.get_run(self._run_id).steps[step_id]
+        session = self._store.get_runtime_session(self._run_id, step_id, "codex")
+        session_thread_id = (
+            session.get("thread_id") if isinstance(session, dict) else None
+        )
+        persisted_thread_id = session_thread_id or state.codex_thread_id
         options = {
             "cwd": self._cwd,
             "model": self._model,
             "sandbox": self._sandbox,
         }
         options = {key: value for key, value in options.items() if value is not None}
-        if state.codex_thread_id is None:
+        if persisted_thread_id is None:
             thread = client.thread_start(**options)
             self._store.set_codex_thread(self._run_id, step_id, thread.id)
             logger.info(
@@ -109,7 +107,7 @@ class CodexRuntime:
                 },
             )
         else:
-            thread = client.thread_resume(state.codex_thread_id, **options)
+            thread = client.thread_resume(persisted_thread_id, **options)
             logger.info(
                 "Codex thread resumed",
                 extra={
@@ -161,9 +159,30 @@ class CodexRuntime:
                 "codex_turn_id": turn.id,
             },
         )
+        usage = getattr(raw, "usage", None)
         return AgentResult(
-            text=raw.final_response,
-            thread_id=thread.id,
-            turn_id=turn.id,
+            output=raw.final_response,
+            provider="codex",
+            model=self._model,
+            session_id=thread.id,
+            invocation_id=turn.id,
+            usage=AgentUsage(
+                input_tokens=getattr(usage, "input_tokens", None),
+                output_tokens=getattr(usage, "output_tokens", None),
+                cached_tokens=getattr(usage, "cached_tokens", None),
+                total_tokens=getattr(usage, "total_tokens", None),
+            ),
             raw=raw,
+        )
+
+    async def execute(
+        self, request: AgentRequest, context: AgentExecutionContext
+    ) -> AgentResult:
+        """Execute through the provider-neutral runtime contract."""
+
+        return await asyncio.to_thread(
+            self.run,
+            context.step_id,
+            request.prompt,
+            output_schema=request.output_schema,
         )

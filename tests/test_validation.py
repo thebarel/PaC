@@ -31,6 +31,8 @@ def test_rejected_agent_outputs_retry_until_valid(tmp_path):
     assert run.output(Calculate) == "42"
     assert run.steps[next(iter(run.steps))].attempt == 3
     assert seen_retry_reasons == [None, "Expected 42, received 'Not possible'", "Expected 42, received '41'"]
+    assert [e.type for e in run.events].count("validation.rejected") == 2
+    assert [e.type for e in run.events].count("validation.accepted") == 1
     assert [e.type for e in run.events].count("step.output_rejected") == 2
 
     with sqlite3.connect(database) as connection:

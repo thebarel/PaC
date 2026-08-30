@@ -3,12 +3,12 @@ from __future__ import annotations
 from .models import CycleState, CycleStatus, StepState, StepStatus, WorkflowDefinition
 
 
-def next_runnable_step(
+def runnable_steps(
     definition: WorkflowDefinition,
     states: dict[str, StepState],
     cycles: dict[str, CycleState] | None = None,
-) -> str | None:
-    """Return the next runnable step ID using registration order only."""
+) -> tuple[str, ...]:
+    """Return every runnable step in deterministic registration order."""
 
     cycles = cycles or {}
     member_cycle = {
@@ -16,6 +16,7 @@ def next_runnable_step(
         for cycle in cycles.values()
         for member in cycle.members
     }
+    runnable: list[str] = []
 
     for step in definition.steps:
         state = states[step.id]
@@ -27,7 +28,7 @@ def next_runnable_step(
             continue
 
         def dependency_ready(dependency: str) -> bool:
-            if states[dependency].status is not StepStatus.COMPLETED:
+            if states[dependency].status not in (StepStatus.COMPLETED, StepStatus.SKIPPED):
                 return False
             dependency_cycle = member_cycle.get(dependency)
             step_cycle = member_cycle.get(step.id)
@@ -38,5 +39,16 @@ def next_runnable_step(
             )
 
         if all(dependency_ready(dependency) for dependency in step.dependencies):
-            return step.id
-    return None
+            runnable.append(step.id)
+    return tuple(runnable)
+
+
+def next_runnable_step(
+    definition: WorkflowDefinition,
+    states: dict[str, StepState],
+    cycles: dict[str, CycleState] | None = None,
+) -> str | None:
+    """Compatibility helper returning the first deterministically runnable step."""
+
+    runnable = runnable_steps(definition, states, cycles)
+    return runnable[0] if runnable else None
